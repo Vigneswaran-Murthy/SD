@@ -60,17 +60,23 @@ fi
 
 # === Network Configuration ===
 if [[ "$DO_NETWORK" =~ ^[Yy]$ ]]; then
-    BACKUP_FILE="${CONFIG_DIR}/01-netcfg.yaml.bak_$(date +%F_%T)"
-    echo -e "\nBacking up current Netplan config to $BACKUP_FILE..."
-    sudo cp ${CONFIG_DIR}/*.yaml "$BACKUP_FILE"
-    echo "Backup completed."
+    echo -e "\nAvailable interfaces:"
+    ip link show | awk -F: '/^[0-9]+: / {print $2}' | grep -vE 'lo|docker|veth'
 
-    read -p "Enter interface name to configure (e.g., ens33): " IFACE
+    read -p "Enter interface name to configure (e.g., ens192): " IFACE
+    CONFIG_FILE="${CONFIG_DIR}/${IFACE}_config.yaml"
+
+    if [ -f "$CONFIG_FILE" ]; then
+        BACKUP_FILE="${CONFIG_FILE}.bak_$(date +%F_%T)"
+        echo "Backing up $CONFIG_FILE to $BACKUP_FILE..."
+        sudo cp "$CONFIG_FILE" "$BACKUP_FILE"
+        echo "Backup completed."
+    fi
+
     read -p "Enter static IP (e.g., 192.168.1.100/24): " IPADDR
     read -p "Enter gateway IP: " GATEWAY
     read -p "Enter DNS servers (comma-separated): " DNS
 
-    CONFIG_FILE="${CONFIG_DIR}/01-netcfg.yaml"
     sudo bash -c "cat > $CONFIG_FILE" <<EOF
 network:
   version: 2
@@ -82,7 +88,7 @@ network:
       nameservers:
         addresses: [$DNS]
 EOF
-    echo "Netplan configuration written. Applying changes..."
+    echo "Netplan configuration written to $CONFIG_FILE. Applying changes..."
     sudo netplan apply
     echo "Network settings applied."
 fi
