@@ -3,13 +3,40 @@
 CONFIG_DIR="/etc/netplan"
 
 # === Task Selection ===
-echo -e "\n========== SELECT TASKS TO PERFORM =========="
+read -p "Do you want to create user account for Madhusudhanan? (y/n): " CREATE_MADHU_USER
 read -p "Change hostname? (y/n): " DO_HOSTNAME
 read -p "Change root password? (y/n): " DO_PASSWORD
 read -p "Configure network interface? (y/n): " DO_NETWORK
 read -p "Register with Canonical Livepatch or UA? (y/n): " DO_REGISTER
-read -p "Remove sssd package if installed? (y/n): " REMOVE_SSSD
 read -p "Install domain join packages? (y/n): " INSTALL_PACKAGES
+read -p "Install and configure Chrony? (y/n): " CONFIGURE_CHRONY
+
+# === Madhusudhanan User Creation ===
+if [[ "$CREATE_MADHU_USER" =~ ^[Yy]$ ]]; then
+    echo "Creating xservice user for Madhusudhanan..."
+    sudo useradd -s /bin/bash -d /home/xservice/ -m -G sudo xservice
+
+    while true; do
+        read -s -p "Enter password for xservice user: " XSERVICE_PASS
+        echo
+        read -s -p "Confirm password: " XSERVICE_CONFIRM
+        echo
+
+        if [[ "$XSERVICE_PASS" != "$XSERVICE_CONFIRM" ]]; then
+            echo "Passwords do not match. Please try again."
+        elif [[ -z "$XSERVICE_PASS" ]]; then
+            echo "Password cannot be empty. Please try again."
+        else
+            echo "xservice:$XSERVICE_PASS" | sudo chpasswd
+            if [ $? -eq 0 ]; then
+                echo "xservice user created and password set successfully."
+            else
+                echo "Failed to set password for xservice user."
+            fi
+            break
+        fi
+    done
+fi
 
 # === Hostname Change ===
 if [[ "$DO_HOSTNAME" =~ ^[Yy]$ ]]; then
@@ -93,46 +120,41 @@ EOF
     echo "Network settings applied."
 fi
 
-# === UA or Livepatch Registration ===
-if [[ "$DO_REGISTER" =~ ^[Yy]$ ]]; then
-    echo -e "\nCanonical UA / Livepatch Setup"
-    read -p "Enter UA token (or press Enter to skip): " UA_TOKEN
-    if [ -n "$UA_TOKEN" ]; then
-        sudo ua attach "$UA_TOKEN"
-        sudo ua enable livepatch
-    else
-        echo "No token entered. Skipping."
-    fi
-fi
-
-# === Package Tasks ===
-if [[ "$REMOVE_SSSD" =~ ^[Yy]$ ]]; then
-    echo -e "\nChecking for sssd packages..."
-    if dpkg -l | grep -q sssd; then
-        echo "Removing sssd packages..."
-        sudo apt remove --purge -y sssd*
-    else
-        echo "SSSD package not installed. Skipping removal."
-    fi
-fi
-
-if [[ "$INSTALL_PACKAGES" =~ ^[Yy]$ ]]; then
-    echo -e "\nInstalling required packages..."
+# === Install Required Packages ===
+read -p "Install required domain join packages? (y/n): " INSTALL_REQUIRED_PKGS
+if [[ "$INSTALL_REQUIRED_PKGS" =~ ^[Yy]$ ]]; then
+    echo "Installing domain join packages..."
     sudo apt update
-    sudo apt install -y realmd sssd sssd-tools libnss-sss libpam-sss adcli samba-common-bin krb5-user packagekit
+    sudo apt install -y realmd sssd sssd-tools adcli krb5-user packagekit samba-common-bin libpam-mkhomedir
+    echo "Packages installed successfully."
+fi
 
-    echo -e "\n========== DOMAIN JOIN =========="
-    read -p "Enter domain join command (or press Enter to skip): " JOIN_CMD
-    if [ -n "$JOIN_CMD" ]; then
-        read -s -p "Enter domain password: " JOIN_PASS
-        echo
-        echo "$JOIN_PASS" | eval "$JOIN_CMD"
+# === Chrony Configuration ===
+if [[ "$CONFIGURE_CHRONY" =~ ^[Yy]$ ]]; then
+    echo -e "\nInstalling and configuring Chrony..."
+    sudo apt-get update
+    sudo apt-get install -y chrony
 
-        echo -e "\nVerifying domain join with 'realm list'..."
-        realm list
-    else
-        echo "Domain join skipped."
-    fi
+    CHRONY_CONF="/etc/chrony/chrony.conf"
+    BACKUP_CHRONY="${CHRONY_CONF}.bak_$(date +%F_%T)"
+    echo "Backing up $CHRONY_CONF to $BACKUP_CHRONY..."
+    sudo cp "$CHRONY_CONF" "$BACKUP_CHRONY"
+    echo "Backup completed."
+
+    read -p "Enter new server or pool entries (comma-separated, e.g., 'server time1.google.com iburst,server time2.google.com iburst'): " NTP_ENTRIES
+
+    # Overwrite the entire chrony.conf with only the user's input
+    sudo bash -c "echo '' > $CHRONY_CONF"
+
+    IFS=',' read -ra ADDR <<< "$NTP_ENTRIES"
+    for entry in "${ADDR[@]}"; do
+        echo "$entry" | sudo tee -a "$CHRONY_CONF" > /dev/null
+    done
+
+    echo "Chrony configuration updated. Restarting service..."
+    sudo systemctl restart chrony
+    sudo systemctl enable chrony
+    echo "Chrony is now configured and running."
 fi
 
 echo -e "\nAll selected tasks completed. Reboot if necessary."
