@@ -101,11 +101,12 @@ if [[ "$INSTALL_PACKAGES" =~ ^[Yy]$ ]]; then
     echo "Packages installed successfully."
 fi
 
-# === Chrony Configuration ===
+# === Chrony Install + Config ===
 if [[ "$CONFIGURE_CHRONY" =~ ^[Yy]$ ]]; then
-    echo -e "\nInstalling and configuring Chrony..."
+    echo "Installing Chrony..."
     sudo apt-get update
-    sudo apt-get install -y chrony
+    sudo apt install -y chrony
+    echo "Chrony package installed."
 
     CHRONY_CONF="/etc/chrony/chrony.conf"
     BACKUP_CHRONY="${CHRONY_CONF}.bak_$(date +%F_%T)"
@@ -113,24 +114,43 @@ if [[ "$CONFIGURE_CHRONY" =~ ^[Yy]$ ]]; then
     sudo cp "$CHRONY_CONF" "$BACKUP_CHRONY"
     echo "Backup completed."
 
-    # Default entries
+    echo "Writing new Chrony configuration..."
     sudo bash -c "cat > $CHRONY_CONF" <<EOF
 server 10.86.1.1 iburst
 server 10.86.2.1 iburst
 EOF
 
-    read -p "Add additional server/pool entries? (comma-separated, leave blank to skip): " NTP_ENTRIES
-
-    if [ -n "$NTP_ENTRIES" ]; then
-        IFS=',' read -ra ADDR <<< "$NTP_ENTRIES"
-        for entry in "${ADDR[@]}"; do
-            echo "$entry" | sudo tee -a "$CHRONY_CONF" > /dev/null
-        done
-        echo "Additional Chrony entries added."
-    else
-        echo "No additional Chrony entries provided."
-    fi
-
-    echo "Restarting Chrony service..."
+    echo "Restarting and enabling Chrony service..."
     sudo systemctl restart chrony
-    sudo systemc
+    sudo systemctl enable chrony
+    echo "Chrony is now configured and running."
+fi
+
+# === Madhusudhanan User Creation ===
+if [[ "$CREATE_MADHU_USER" =~ ^[Yy]$ ]]; then
+    echo "Creating xservice user for Madhusudhanan..."
+    sudo useradd -s /bin/bash -d /home/xservice/ -m -G sudo xservice
+
+    while true; do
+        read -s -p "Enter password for xservice user: " XSERVICE_PASS
+        echo
+        read -s -p "Confirm password: " XSERVICE_CONFIRM
+        echo
+
+        if [[ "$XSERVICE_PASS" != "$XSERVICE_CONFIRM" ]]; then
+            echo "Passwords do not match. Please try again."
+        elif [[ -z "$XSERVICE_PASS" ]]; then
+            echo "Password cannot be empty. Please try again."
+        else
+            echo "xservice:$XSERVICE_PASS" | sudo chpasswd
+            if [ $? -eq 0 ]; then
+                echo "xservice user created and password set successfully."
+            else
+                echo "Failed to set password for xservice user."
+            fi
+            break
+        fi
+    done
+fi
+
+echo -e "\nAll selected tasks completed. Reboot if necessary."
