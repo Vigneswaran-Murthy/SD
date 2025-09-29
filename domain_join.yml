@@ -1,0 +1,212 @@
+---
+- name: Join Linux server to Active Directory domain
+  hosts: all
+  become: true
+  tags:
+    - Domain_join
+
+  vars_files:
+    - vars/domain_credentials.yml   # contains domain_user, domain_password, domain_name, ou_map
+    - vars/sssd_vars.yml            # contains sssd_groups list
+
+  tasks:
+    ##################################################################
+    # Install required packages
+    ##################################################################
+    - name: Install required packages for realm join
+      yum:
+        name:
+          - realmd
+          - sssd
+          - sssd-tools
+          - adcli
+          - krb5-workstation
+          - oddjob
+          - oddjob-mkhomedir
+          - samba-common
+          - samba-common-tools
+          - authselect-compat
+        state: present
+      register: sssd_install
+
+    ##################################################################
+    # Detect environment
+    ##################################################################
+    - name: Detect short hostname
+      set_fact:
+        short_hostname: "{{ inventory_hostname.split('.')[0] }}"
+
+    - name: Detect environment from hostname (6th letter)
+      set_fact:
+        env_letter: "{{ short_hostname[5] }}"
+        domain_env: >-
+          {% if short_hostname[5] == 'p' %}PROD
+          {% elif short_hostname[5] == 't' %}TEST
+          {% elif short_hostname[5] == 'd' %}DEV
+          {% else %}UNKNOWN{% endif %}
+
+    - name: Normalize environment name (trim spaces)
+      set_fact:
+        domain_env: "{{ domain_env | trim }}"
+
+    - name: Fail if environment could not be determined
+      fail:
+        msg: "Unable to determine environment from hostname: {{ short_hostname }}"
+      when: domain_env == "UNKNOWN"
+
+    - name: Set the OU based on detected environment
+      set_fact:
+        domain_ou: "{{ ou_map[domain_env] }}"
+
+    - name: Show detected environment and OU
+      debug:
+        msg: "Hostname={{ short_hostname }}, Environment={{ domain_env }}, OU={{ domain_ou }}"
+
+    ##################################################################
+    # Domain Join
+    ##################################################################
+    - name: Join system to AD domain
+      command: >
+        realm join --user={{ domain_user }} {{ domain_name }}
+        --computer-ou="{{ domain_ou }}"
+      args:
+        stdin: "{{ domain_password }}"
+      register: ansible_output
+      ignore_errors: yes
+
+    ##################################################################
+    # Post-Join: Manage sssd.conf
+    ##################################################################
+    - name: Check if /etc/sssd/sssd.conf exists
+      stat:
+        path: /etc/sssd/sssd.conf
+      register: sssd_conf
+
+    - name: Backup existing sssd.conf with date
+      copy:
+        src: /etc/sssd/sssd.conf
+        dest: "/etc/sssd/sssd.conf_bak_{{ lookup('pipe', 'date +%d%b%Y') }}"
+        remote_src: yes
+      when: sssd_conf.stat.exists
+
+    - name: Deploy new sssd.conf
+      copy:
+        dest: /etc/sssd/sssd.conf
+        content: |
+          [sssd]
+          domains = corp.sandisk.com
+          config_file_version = 2
+          services = nss, pam
+          timeout = 150
+
+          [nss]
+          homedir_substring = /home
+          timeout = 150
+
+          [domain/corp.sandisk.com]
+          ad_domain = corp.sandisk.com
+          #ad_site = corp.sandisk.com
+          timeout = 150
+          krb5_realm = CORP.SANDISK.COM
+          realmd_tags = manages-system joined-with-samba
+          cache_credentials = True
+          id_provider = ad
+          krb5_store_password_if_offline = True
+          krb5_auth_timeout = 30
+          default_shell = /bin/bash
+          ldap_id_mapping = True
+          use_fully_qualified_names = False
+          fallback_homedir = /home/%u
+          access_provider = ad
+          simple_allow_users =
+          simple_allow_groups = IT-Infra-Linux-Support-Flash, IT-Infra-Linux-Support{% if sssd_groups is defined and sssd_groups|length > 0 %}, {{ sssd_groups | join(', ') }}{% endif %}
+
+          ad_gpo_ignore_unreadable = True
+          #ldap_user_principal = nosuchattr
+          subdomain_inherit = ignore_group_members, ldap_purge_cache_timeout
+          ignore_group_members = True
+          ldap_purge_cache_timeout = 0
+          ad_enable_gc = False
+          override_homedir = /home/%u
+          ldap_use_tokengroups = false
+          dns_resolver_timeout = 60
+          dyndns_update = false
+
+          [pam]
+          timeout = 150
+
+          [pac]
+          timeout = 150
+        owner: root
+        group: root
+        mode: '0600'
+      register: sssd_config
+
+    ##################################################################
+    # Clean SSSD cache and restart
+    ##################################################################
+    - name: Stop sssd
+      systemd:
+        name: sssd
+        state: stopped
+
+    - name: Clear sssd cache and logs
+      file:
+        path: "{{ item }}"
+        state: absent
+      with_items:
+        - /var/log/sssd
+        - /var/lib/sss/db
+        - /var/lib/sss/mc
+
+    - name: Recreate directories for SSSD
+      file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "{{ item.owner }}"
+        group: "{{ item.group }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - { path: '/var/log/sssd', owner: 'sssd', group: 'sssd', mode: '0755' }
+        - { path: '/var/lib/sss/db', owner: 'sssd', group: 'sssd', mode: '0700' }
+        - { path: '/var/lib/sss/mc', owner: 'sssd', group: 'sssd', mode: '0700' }
+
+    - name: Start sssd
+      systemd:
+        name: sssd
+        state: started
+        enabled: yes
+
+    ##################################################################
+    # Configure sudoers (hardcoded only)
+    ##################################################################
+    - name: Configure sudo access for AD groups
+      copy:
+        dest: /etc/sudoers.d/sssd_admin
+        content: |
+          %IT-Infra-Linux-Support-Flash ALL=(ALL:ALL) NOPASSWD: ALL
+          %IT-Infra-Linux-Support ALL=(ALL:ALL) NOPASSWD: ALL
+        owner: root
+        group: root
+        mode: '0440'
+
+    ##################################################################
+    # Final Logging
+    ##################################################################
+    - name: Log domain join task status
+      import_tasks: log_task_status.yml
+      vars:
+        task_result: "{{ ansible_output }}"
+        task_name: "Join system to AD domain"
+
+    - name: Log SSSD install status
+      import_tasks: log_task_status.yml
+      vars:
+        task_result: "{{ sssd_install }}"
+        task_name: "SSSD package installation"
+
+    - name: Log SSSD config status
+      import_tasks: log_task_status.yml
+      vars:
+        task_result: "{{ sssd_config }}"
+        task_name: "SSSD configuration"
