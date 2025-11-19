@@ -1,0 +1,20 @@
+- name: Log task status for current host
+  delegate_to: localhost
+  become: false
+  shell: |
+    HOST_DIR="{{ playbook_dir }}/ansible_output/{{ inventory_hostname }}"
+    mkdir -p "$HOST_DIR"
+
+    if [ "{{ task_result.failed | default(false) }}" = "True" ]; then
+      STATUS="Failed"
+    elif [ "{{ task_result.skipped | default(false) }}" = "True" ]; then
+      STATUS="Skipped"
+    else
+      STATUS="Success"
+    fi
+
+    # Safely update host status file
+    grep -v -F "{{ task_name }}" "$HOST_DIR/status.txt" 2>/dev/null > "$HOST_DIR/status.tmp" || true
+    mv "$HOST_DIR/status.tmp" "$HOST_DIR/status.txt" 2>/dev/null || touch "$HOST_DIR/status.txt"
+
+    echo -e "{{ task_name }}\t$STATUS" >> "$HOST_DIR/status.txt"
