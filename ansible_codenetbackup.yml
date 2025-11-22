@@ -1,0 +1,196 @@
+---
+- name: NetBackup Client Fresh Installation (Certificate Optional Mode)
+  hosts: all
+  become: yes
+  vars_files:
+    - vars/nb_vars.yml
+
+  vars:
+    token_arg: "{{ token }}"
+    cert_arg: "{{ cert | default('') }}"
+    install_answer: "/tmp/NBInstallAnswer.conf"
+    lock_file: "/tmp/.Lock_File_NBU_Client_Install"
+    bp_conf_path: "/usr/openv/netbackup/bp.conf"
+    ports_to_check:
+      - 1556
+      - 13724
+      - 13782
+      - 13720
+      - 10082
+      - 10102
+
+  tasks:
+
+  # ===========================================================================
+  # 1. PRE CHECKS
+  # ===========================================================================
+    - name: Ensure lock is not present
+      fail:
+        msg: "Another installation process is running!"
+      when: lock_file is exists
+
+    - name: Create lock file
+      file:
+        path: "{{ lock_file }}"
+        state: touch
+
+    - name: Verify required vars
+      fail:
+        msg: "MASTER_SERVER, CLIENT_NAME or INSTALLER_PATH missing in nb_vars.yml"
+      when:
+        - MASTER_SERVER is not defined
+        - CLIENT_NAME is not defined
+        - INSTALLER_PATH is not defined
+
+    - name: DNS check - Master
+      shell: "host {{ MASTER_SERVER }} | awk '{print $1}'"
+      register: master_dns
+      failed_when: master_dns.stdout == ""
+      changed_when: false
+
+    - name: DNS check - Client
+      shell: "host {{ CLIENT_NAME }} | awk '{print $1}'"
+      register: client_dns
+      failed_when: client_dns.stdout == ""
+      changed_when: false
+
+    - name: Fail if NetBackup already installed
+      shell: "rpm -qa | grep -q '^VRTS'"
+      register: nbu_found
+      failed_when: nbu_found.rc == 0
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Stop if NBU exists
+      fail:
+        msg: "NetBackup already installed. Cannot proceed."
+      when: nbu_found.rc == 0
+
+    - name: Validate installer path exists
+      stat:
+        path: "{{ INSTALLER_PATH }}"
+      register: inst_path
+
+    - name: Fail if installer path invalid
+      fail:
+        msg: "Installer path {{ INSTALLER_PATH }} does not exist!"
+      when: not inst_path.stat.exists
+
+    - name: Check if install file exists
+      stat:
+        path: "{{ INSTALLER_PATH }}/install"
+      register: inst_file
+
+    - name: Fail if install binary missing
+      fail:
+        msg: "'install' binary not found in {{ INSTALLER_PATH }}!"
+      when: not inst_file.stat.exists
+
+  # ===========================================================================
+  # 2. TOKEN & CERTIFICATE HANDLING
+  # ===========================================================================
+    - name: Validate token exists
+      fail:
+        msg: "Token (--token) must be provided!"
+      when: token_arg|length == 0
+
+    - name: Determine certificate mode
+      set_fact:
+        cert_mode: "{{ 'manual' if cert_arg|length > 0 else 'auto' }}"
+
+  # ===========================================================================
+  # 3. PORT CHECK
+  # ===========================================================================
+    - name: Check connectivity ports to Master
+      shell: "nc -z -v {{ MASTER_SERVER }} {{ item }} >/dev/null 2>&1 && echo OPEN || echo BLOCKED"
+      loop: "{{ ports_to_check }}"
+      register: port_results
+      changed_when: false
+
+    - name: Print port status
+      debug:
+        msg: "{{ item.item }} -> {{ item.stdout }}"
+      loop: "{{ port_results.results }}"
+
+  # ===========================================================================
+  # 4. CREATE ANSWER FILE
+  # ===========================================================================
+    - name: Create NBInstallAnswer.conf
+      copy:
+        dest: "{{ install_answer }}"
+        mode: '0644'
+        content: |
+          NB_FIPS_MODE = {{ NB_FIPS_MODE }}
+          CLIENT_NAME = {{ client_dns.stdout }}
+          SERVER = {{ master_dns.stdout }}
+          MACHINE_ROLE = CLIENT
+          {% if cert_mode == 'manual' %}
+          CA_CERTIFICATE_FINGERPRINT = {{ cert_arg }}
+          {% else %}
+          # Auto-download CA certificate
+          {% endif %}
+          AUTHORIZATION_TOKEN = {{ token_arg }}
+          PROCEED_WITH_INSTALL = YES
+          ACCEPT_EULA = YES
+
+  # ===========================================================================
+  # 5. RUN INSTALLER
+  # ===========================================================================
+    - name: Run NetBackup Installer
+      shell: |
+        cd {{ INSTALLER_PATH }}
+        (echo y; echo {{ master_dns.stdout }}; echo n; echo {{ client_dns.stdout }}; echo 2) \
+        | ./install -answer_file "{{ install_answer }}"
+      register: install_output
+      changed_when: true
+
+    - name: Print installer result
+      debug:
+        var: install_output.stdout_lines
+
+  # ===========================================================================
+  # 6. CREATE bp.conf
+  # ===========================================================================
+    - name: Create bp.conf directory
+      file:
+        path: "{{ bp_conf_path | dirname }}"
+        state: directory
+
+    - name: Write bp.conf
+      copy:
+        dest: "{{ bp_conf_path }}"
+        mode: '0644'
+        content: |
+          SERVER = {{ MASTER_SERVER }}
+          CLIENT_NAME = {{ CLIENT_NAME }}
+          CONNECT_OPTIONS = {{ CONNECT_OPTIONS }}
+          NB_FIPS_MODE = {{ NB_FIPS_MODE }}
+          SERVICE_USER = {{ SERVICE_USER }}
+          {% for media in MEDIA_SERVERS %}
+          MEDIA_SERVER = {{ media }}
+          {% endfor %}
+
+  # ===========================================================================
+  # 7. CLEANUP
+  # ===========================================================================
+    - name: Remove lock file
+      file:
+        path: "{{ lock_file }}"
+        state: absent
+
+
+
+
+######################
+
+MASTER_SERVER: "mpp-op-snbkip1.sandisk.com"
+CLIENT_NAME: "client-hostname"
+INSTALLER_PATH: "/home/7400428/netbackup_fresh_installation/software/NBU_10.3.0.1/Netbackup_10.3.0.1_Clients2"
+LOG_PATH: "/home/7400428/Ansible_Automation_Final/Netbackup_inst/logs"
+NB_FIPS_MODE: "MANDATORY"
+CONNECT_OPTIONS: "vnetd"
+SERVICE_USER: "root"
+
+MEDIA_SERVERS:
+  - "mpp-op-snbkip2.sandisk.com"
+  - "mpp-op-snbkip3.sandisk.com"
